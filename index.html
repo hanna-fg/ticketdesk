@@ -1,0 +1,642 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TicketDesk</title>
+
+  <!--
+    98.css provides the Windows 98 styling for windows,
+    buttons, fieldsets and title bars.
+  -->
+  <link rel="stylesheet" href="https://unpkg.com/98.css@0.1.20/dist/98.css">
+
+  <!--
+    Supabase client library. The browser reads and writes
+    directly to the Supabase database; no separate server is needed.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+
+  <style>
+    body     { background: #e9e9e6; padding: 16px; max-width: 720px; margin: auto; }
+    .window  { margin-bottom: 16px; }
+    .ticket  { margin: 6px 0; }
+    .meta    { color: #555; font-size: 11px; }
+    .slip    { color: darkred; font-weight: bold; }
+    .soon    { background: darkred; color: white; padding: 0 4px; }
+    .done    { text-decoration: line-through; color: gray; }
+    .row     { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0; }
+    textarea { width: 100%; min-height: 50px; }
+  </style>
+</head>
+<body>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     SIGN-IN WINDOW
+     Shown until the user signs in.
+     Sign-in uses a magic link sent by email; no password is required.
+     ═══════════════════════════════════════════════════════ -->
+<div class="window" id="loginWindow">
+  <div class="title-bar">
+    <div class="title-bar-text">Welcome</div>
+  </div>
+  <div class="window-body">
+    <p>Type your email. Supabase sends you a sign-in link.</p>
+    <div class="row">
+      <input id="emailInput" type="email" placeholder="you@example.com" style="flex:1">
+      <button onclick="signIn()">Send link</button>
+    </div>
+    <p id="loginMessage"></p>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════
+     THE APP
+     Everything below is hidden until sign-in succeeds.
+     Four windows: Today, New ticket, Projects, Backlog.
+     ═══════════════════════════════════════════════════════ -->
+<div id="app" hidden>
+
+  <!-- ─── TODAY: tickets planned for today ─── -->
+  <div class="window">
+    <div class="title-bar">
+      <div class="title-bar-text">Today.exe</div>
+      <div class="title-bar-controls">
+        <button aria-label="Close" onclick="signOut()"></button>
+      </div>
+    </div>
+    <div class="window-body">
+      <div id="carriedOver"></div>
+      <div id="todayList"></div>
+      <div id="upcoming"></div>
+    </div>
+  </div>
+
+  <!-- ─── NEW TICKET: form to create a ticket ─── -->
+  <div class="window">
+    <div class="title-bar">
+      <div class="title-bar-text">New ticket</div>
+    </div>
+    <div class="window-body">
+      <div class="row">
+        <input id="newTitle" placeholder="What needs doing?" style="flex:1">
+      </div>
+      <div class="row">
+        <select id="projectPicker"></select>
+        Importance
+        <select id="importancePicker">
+          <option value="1">Low</option>
+          <option value="2" selected>Med</option>
+          <option value="3">High</option>
+        </select>
+        Urgency
+        <select id="urgencyPicker">
+          <option value="1">Low</option>
+          <option value="2" selected>Med</option>
+          <option value="3">High</option>
+        </select>
+      </div>
+      <div class="row">
+        Plan for <input type="date" id="planDate">
+        at <input type="time" id="startTime">
+        <span class="meta">(leave the date empty → backlog)</span>
+      </div>
+      <textarea id="newDescription" placeholder="Description (optional)"></textarea>
+      <div class="row">
+        <button onclick="addTicket()">Add ticket</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── PROJECTS: list + create ─── -->
+  <div class="window">
+    <div class="title-bar">
+      <div class="title-bar-text">Projects</div>
+    </div>
+    <div class="window-body">
+      <div id="projectList"></div>
+      <fieldset>
+        <legend>New project</legend>
+        <div class="row">
+          <input id="newProjectName" placeholder="Project name" style="flex:1">
+        </div>
+        <div class="row">
+          Start <input type="date" id="projectStart">
+          Deadline <input type="date" id="projectDeadline">
+          <button onclick="addProject()">Add project</button>
+        </div>
+      </fieldset>
+    </div>
+  </div>
+
+  <!-- ─── BACKLOG: unplanned tickets ─── -->
+  <div class="window">
+    <div class="title-bar">
+      <div class="title-bar-text">Backlog</div>
+    </div>
+    <div class="window-body" id="backlogList"></div>
+  </div>
+
+</div>
+
+
+<script>
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 1: CONFIGURATION                                   │
+// │                                                              │
+// │  Connection settings for the Supabase project.               │
+// │  Both values are listed under                                │
+// │  Supabase → Project Settings → API.                          │
+// │                                                              │
+// │  The anon key is designed to be public. The row-level        │
+// │  security rules in setup.sql limit each signed-in user       │
+// │  to their own data.                                          │
+// └──────────────────────────────────────────────────────────────┘
+const SUPABASE_URL = "https://digbrvbkfxtoxcbstwuu.supabase.co";
+const SUPABASE_KEY = "sb_publishable_cV58vNw_svmExXnjpiTsog_fy0DMTaC";
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 2: DATABASE CONNECTION                              │
+// │                                                              │
+// │  `db` is the Supabase connection used below to read and      │
+// │  write data.                                                 │
+// │  `data` holds everything currently loaded from the database. │
+// └──────────────────────────────────────────────────────────────┘
+const db   = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+let   data = { projects: [], tickets: [] };
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 3: AUTHENTICATION                                  │
+// │                                                              │
+// │  signIn(): sends a magic link to the entered email.          │
+// │  signOut(): signs out and reloads the page.                  │
+// │  onAuthStateChange: runs whenever sign-in status changes     │
+// │    and shows or hides the app accordingly.                   │
+// └──────────────────────────────────────────────────────────────┘
+
+async function signIn() {
+  const email = document.getElementById("emailInput").value.trim();
+
+  // Request a sign-in link from Supabase.
+  // Opening the link returns the user to this page, signed in.
+  const { error } = await db.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: location.origin + location.pathname }
+  });
+
+  document.getElementById("loginMessage").textContent = error
+    ? "Couldn't send the link: " + error.message
+    : "Check your inbox and tap the link.";
+}
+
+async function signOut() {
+  await db.auth.signOut();
+  location.reload();
+}
+
+// Runs on page load and on every sign-in or sign-out.
+// Signed in → hide login, show app, load data.
+// Signed out → show login, hide app.
+db.auth.onAuthStateChange((_event, session) => {
+  document.getElementById("loginWindow").hidden = !!session;
+  document.getElementById("app").hidden          = !session;
+  if (session) loadAllData();
+});
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 4: SMALL HELPERS                                   │
+// │                                                              │
+// │  Short utility functions used throughout the code below.     │
+// └──────────────────────────────────────────────────────────────┘
+
+// Today's date as "2026-11-08" (the format Supabase uses).
+function today() {
+  return new Date().toLocaleDateString("sv-SE");
+}
+
+// How many days between two date strings. Positive = b is later.
+function daysBetween(a, b) {
+  return Math.round((new Date(b) - new Date(a)) / 86400000);
+}
+
+// Priority score: importance × urgency. Ranges 1 (low/low) to 9 (high/high).
+function priority(ticket) {
+  return ticket.importance * ticket.urgency;
+}
+
+// "14:00:00" → "14:00" (drop the seconds Supabase stores).
+function shortTime(time) {
+  return time ? time.slice(0, 5) : "";
+}
+
+// Find a ticket by its database ID.
+function findTicket(id) {
+  return data.tickets.find(t => t.id === id);
+}
+
+// Look up which project a ticket belongs to.
+function projectName(projectId) {
+  const match = data.projects.find(p => p.id === projectId);
+  return match ? match.name : "No project";
+}
+
+// Escape HTML so user-typed text can't break the page.
+function esc(text) {
+  return String(text ?? "").replace(/[&<>"]/g, c => "&#" + c.charCodeAt(0) + ";");
+}
+
+// How long a project runs, in human words.
+function projectLength(project) {
+  if (!project.start_date || !project.deadline) return "";
+  const days = daysBetween(project.start_date, project.deadline) + 1;
+  return days >= 14 ? Math.round(days / 7) + " weeks" : days + " days";
+}
+
+// How many minutes until a timed ticket starts.
+// Returns null if the ticket has no time or isn't planned for today.
+function minutesUntilStart(ticket) {
+  if (!ticket.start_time || ticket.planned_for !== today()) return null;
+  const [hours, minutes] = ticket.start_time.split(":").map(Number);
+  const now = new Date();
+  return (hours * 60 + minutes) - (now.getHours() * 60 + now.getMinutes());
+}
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 5: LOADING DATA                                    │
+// │                                                              │
+// │  Pulls all projects and tickets from Supabase,               │
+// │  stores them in `data`, then redraws the page.               │
+// │  Called once on sign-in, and again after every change.       │
+// └──────────────────────────────────────────────────────────────┘
+
+async function loadAllData() {
+  const projectRows = await db.from("projects").select("*").order("created_at");
+  const ticketRows  = await db.from("tickets").select("*").order("created_at");
+
+  if (projectRows.error || ticketRows.error) {
+    alert("Couldn't load: " + (projectRows.error || ticketRows.error).message);
+    return;
+  }
+
+  data = {
+    projects: projectRows.data,
+    tickets:  ticketRows.data
+  };
+
+  render();
+}
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 6: SAVING CHANGES                                  │
+// │                                                              │
+// │  Two functions that every action below uses:                 │
+// │  - updateTicket: change fields on an existing ticket.        │
+// │  - insertRow: add a new row to any table.                    │
+// │  Both save to the database, then reload everything.          │
+// └──────────────────────────────────────────────────────────────┘
+
+async function updateTicket(id, fieldsToChange) {
+  const { error } = await db.from("tickets").update(fieldsToChange).eq("id", id);
+  if (error) alert("Couldn't save: " + error.message);
+  await loadAllData();
+}
+
+async function insertRow(table, newRow) {
+  const { error } = await db.from(table).insert(newRow);
+  if (error) alert("Couldn't save: " + error.message);
+  await loadAllData();
+}
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 7: USER ACTIONS                                    │
+// │                                                              │
+// │  One function per user action. Each reads the form,          │
+// │  writes to the database, and the page redraws via            │
+// │  loadAllData().                                              │
+// └──────────────────────────────────────────────────────────────┘
+
+// ── Create a new project ──
+function addProject() {
+  const name = document.getElementById("newProjectName").value.trim();
+  if (!name) return;
+
+  insertRow("projects", {
+    name,
+    start_date: document.getElementById("projectStart").value   || null,
+    deadline:   document.getElementById("projectDeadline").value || null
+  });
+
+  document.getElementById("newProjectName").value = "";
+}
+
+// ── Create a new ticket ──
+function addTicket() {
+  const title = document.getElementById("newTitle").value.trim();
+  if (!title) return;
+
+  const plannedFor = document.getElementById("planDate").value || null;
+
+  insertRow("tickets", {
+    title,
+    project_id:      Number(document.getElementById("projectPicker").value) || null,
+    importance:       Number(document.getElementById("importancePicker").value),
+    urgency:          Number(document.getElementById("urgencyPicker").value),
+    planned_for:      plannedFor,
+    start_time:       document.getElementById("startTime").value || null,
+    added_to_backlog: plannedFor ? null : today(),   // no date = goes straight to backlog
+    description:      document.getElementById("newDescription").value
+  });
+
+  document.getElementById("newTitle").value       = "";
+  document.getElementById("newDescription").value = "";
+}
+
+// ── Check or uncheck a ticket ──
+function toggleDone(id) {
+  const ticket = findTicket(id);
+  updateTicket(id, { done: !ticket.done });
+}
+
+// ── Move a carried-over ticket to today ──
+// If it was planned for an earlier day, that counts as a slip.
+function moveToToday(id) {
+  const ticket  = findTicket(id);
+  const wasLate = ticket.planned_for && ticket.planned_for < today();
+
+  updateTicket(id, {
+    planned_for: today(),
+    slips:       ticket.slips + (wasLate ? 1 : 0)
+  });
+}
+
+// ── Send a ticket back to the backlog ──
+// If it had a plan date, that counts as a slip (planned but not done).
+function moveToBacklog(id) {
+  const ticket = findTicket(id);
+
+  updateTicket(id, {
+    planned_for:      null,
+    start_time:       null,
+    added_to_backlog: today(),
+    slips:            ticket.slips + (ticket.planned_for ? 1 : 0)
+  });
+}
+
+// ── Save edits inside a ticket's "Details" panel ──
+function saveDetails(id) {
+  updateTicket(id, {
+    description: document.getElementById("desc-" + id).value,
+    planned_for: document.getElementById("date-" + id).value || null,
+    start_time:  document.getElementById("time-" + id).value || null
+  });
+}
+
+// ── Delete a ticket permanently ──
+async function deleteTicket(id) {
+  await db.from("tickets").delete().eq("id", id);
+  loadAllData();
+}
+
+// ── Add a checklist step to a ticket ──
+function addChecklistItem(id) {
+  const input = document.getElementById("item-" + id);
+  if (!input.value.trim()) return;
+
+  const currentList = findTicket(id).checklist;
+  const updated     = [...currentList, { text: input.value.trim(), done: false }];
+  updateTicket(id, { checklist: updated });
+}
+
+// ── Toggle one checklist step done or undone ──
+function toggleChecklistItem(ticketId, stepIndex) {
+  const currentList = findTicket(ticketId).checklist;
+  const updated = currentList.map((item, i) =>
+    i === stepIndex ? { ...item, done: !item.done } : item
+  );
+  updateTicket(ticketId, { checklist: updated });
+}
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 8: RENDERING                                       │
+// │                                                              │
+// │  Turns `data` into HTML. Called after every change.          │
+// │  This section only reads data; it never changes it.          │
+// └──────────────────────────────────────────────────────────────┘
+
+// ── Sorting rule: timed tickets first (by time), then by priority ──
+function sortByTimeThenPriority(a, b) {
+  if (a.done !== b.done) return a.done ? 1 : -1;                          // done → bottom
+  if (!!a.start_time !== !!b.start_time) return a.start_time ? -1 : 1;    // timed → top
+  if (a.start_time && b.start_time) {                                     // earlier time first
+    const cmp = a.start_time.localeCompare(b.start_time);
+    if (cmp !== 0) return cmp;
+  }
+  return priority(b) - priority(a);                                        // higher priority first
+}
+
+// ── Build the HTML for one ticket ──
+// `buttons` is the action HTML at the bottom (different per section).
+function ticketHTML(ticket, buttons) {
+  const doneSteps   = ticket.checklist.filter(i => i.done).length;
+  const totalSteps  = ticket.checklist.length;
+  const minutesLeft = minutesUntilStart(ticket);
+
+  // Checklist rows
+  const checklistRows = ticket.checklist.map((item, i) => `
+    <div>
+      <input type="checkbox" id="c-${ticket.id}-${i}"
+             ${item.done ? "checked" : ""}
+             onclick="toggleChecklistItem(${ticket.id}, ${i})">
+      <label for="c-${ticket.id}-${i}" class="${item.done ? "done" : ""}">
+        ${esc(item.text)}
+      </label>
+    </div>`
+  ).join("");
+
+  return `
+    <fieldset class="ticket">
+
+      <!-- Title row: checkbox, time, name, and optional "in X min" badge -->
+      <div class="row">
+        <input type="checkbox" id="t-${ticket.id}"
+               ${ticket.done ? "checked" : ""}
+               onclick="toggleDone(${ticket.id})">
+        <label for="t-${ticket.id}" class="${ticket.done ? "done" : ""}">
+          ${ticket.start_time ? `<b>${shortTime(ticket.start_time)}</b> ` : ""}
+          <b>${esc(ticket.title)}</b>
+        </label>
+        ${(!ticket.done && minutesLeft > 0 && minutesLeft <= 60)
+          ? `<span class="soon">in ${minutesLeft} min</span>`
+          : ""}
+      </div>
+
+      <!-- Info line: project, priority score, checklist progress, slips, lateness -->
+      <div class="meta">
+        ${esc(projectName(ticket.project_id))}
+        · priority ${priority(ticket)}/9
+        ${totalSteps   ? ` · ${doneSteps}/${totalSteps} steps` : ""}
+        ${ticket.slips ? `<span class="slip"> · slipped ${ticket.slips}×</span>` : ""}
+        ${(!ticket.planned_for && ticket.added_to_backlog)
+          ? ` · in backlog ${daysBetween(ticket.added_to_backlog, today())} days`
+          : ""}
+        ${(ticket.planned_for && ticket.planned_for < today() && !ticket.done)
+          ? `<span class="slip"> · ${daysBetween(ticket.planned_for, today())} days late</span>`
+          : ""}
+      </div>
+
+      <!-- Expandable panel: description, dates, checklist -->
+      <details>
+        <summary>Details and checklist</summary>
+        <textarea id="desc-${ticket.id}"
+                  placeholder="Description">${esc(ticket.description)}</textarea>
+        <div class="row">
+          Plan for <input type="date" id="date-${ticket.id}" value="${ticket.planned_for || ""}">
+          at       <input type="time" id="time-${ticket.id}" value="${shortTime(ticket.start_time)}">
+          <button onclick="saveDetails(${ticket.id})">Save</button>
+        </div>
+        ${checklistRows}
+        <div class="row">
+          <input id="item-${ticket.id}" placeholder="Small step">
+          <button onclick="addChecklistItem(${ticket.id})">Add step</button>
+        </div>
+      </details>
+
+      <div class="row">${buttons}</div>
+    </fieldset>`;
+}
+
+
+// ── Main render: rebuild all four windows from current data ──
+function render() {
+  const openTickets = data.tickets.filter(t => !t.done);
+  const totalSlips  = data.tickets.reduce((sum, t) => sum + t.slips, 0);
+
+
+  // Fill the project dropdown in the "New ticket" form.
+  document.getElementById("projectPicker").innerHTML =
+    data.projects.map(p =>
+      `<option value="${p.id}">${esc(p.name)}</option>`
+    ).join("");
+
+  // Default the plan date to today if the field is empty.
+  const planInput = document.getElementById("planDate");
+  if (!planInput.value) planInput.value = today();
+
+
+  // ── CARRIED OVER ──
+  // Tickets planned for an earlier day that still aren't done.
+  // Each can be moved to today or back to the backlog; either counts a slip.
+  const carriedOver = openTickets.filter(t =>
+    t.planned_for && t.planned_for < today()
+  );
+
+  document.getElementById("carriedOver").innerHTML = carriedOver.length
+    ? "<h4>Carried over</h4>" +
+      carriedOver.map(t => ticketHTML(t,
+        `<button onclick="moveToToday(${t.id})">Do today</button>
+         <button onclick="moveToBacklog(${t.id})">Back to backlog</button>`
+      )).join("")
+    : "";
+
+
+  // ── TODAY ──
+  // Tickets planned for today, sorted: timed first, then by priority.
+  const todaysTickets = data.tickets
+    .filter(t => t.planned_for === today())
+    .sort(sortByTimeThenPriority);
+
+  const doneCount = todaysTickets.filter(t => t.done).length;
+
+  document.getElementById("todayList").innerHTML =
+    `<h4>Today · ${doneCount}/${todaysTickets.length} done` +
+    ` · ${totalSlips} slips total</h4>` +
+    (todaysTickets.length
+      ? todaysTickets.map(t => ticketHTML(t,
+          `<button onclick="moveToBacklog(${t.id})">Not today</button>`
+        )).join("")
+      : "<p>Nothing planned yet.</p>");
+
+
+  // ── NEXT 7 DAYS ──
+  // Read-only preview of upcoming tickets.
+  const oneWeekOut = new Date();
+  oneWeekOut.setDate(oneWeekOut.getDate() + 7);
+  const oneWeekStr = oneWeekOut.toLocaleDateString("sv-SE");
+
+  const upcomingTickets = openTickets
+    .filter(t => t.planned_for > today() && t.planned_for <= oneWeekStr)
+    .sort((a, b) => a.planned_for.localeCompare(b.planned_for));
+
+  document.getElementById("upcoming").innerHTML = upcomingTickets.length
+    ? "<h4>Next 7 days</h4><ul>" +
+      upcomingTickets.map(t =>
+        `<li>${t.planned_for.slice(5)} ${shortTime(t.start_time)}
+             ${esc(t.title)}
+             <span class="meta">${esc(projectName(t.project_id))}</span></li>`
+      ).join("") + "</ul>"
+    : "";
+
+
+  // ── PROJECTS ──
+  // Each project with its dates, duration, open ticket count, and slip total.
+  document.getElementById("projectList").innerHTML =
+    data.projects.map(p => {
+      const myTickets = data.tickets.filter(t => t.project_id === p.id);
+      const slips     = myTickets.reduce((sum, t) => sum + t.slips, 0);
+      const openCount = myTickets.filter(t => !t.done).length;
+
+      return `<div class="row">
+        <b>${esc(p.name)}</b>
+        <span class="meta">
+          ${p.start_date || "?"} → ${p.deadline || "?"}
+          ${projectLength(p) ? "· " + projectLength(p) : ""}
+          ${p.deadline ? "· " + daysBetween(today(), p.deadline) + " days left" : ""}
+          · ${openCount} open · ${slips} slips
+        </span>
+      </div>`;
+    }).join("") || "<p>No projects yet.</p>";
+
+
+  // ── BACKLOG ──
+  // Tickets with no plan date, grouped by project, highest priority first.
+  const backlogTickets = openTickets.filter(t => !t.planned_for);
+
+  document.getElementById("backlogList").innerHTML =
+    data.projects.map(p => {
+      const items = backlogTickets
+        .filter(t => t.project_id === p.id)
+        .sort((a, b) => priority(b) - priority(a));
+
+      if (!items.length) return "";
+
+      return `<h4>${esc(p.name)} (${items.length})</h4>` +
+        items.map(t => ticketHTML(t,
+          `<button onclick="moveToToday(${t.id})">Do today</button>
+           <button onclick="deleteTicket(${t.id})">Delete</button>`
+        )).join("");
+    }).join("") || "<p>Backlog is empty.</p>";
+}
+
+
+// ┌──────────────────────────────────────────────────────────────┐
+// │  SECTION 9: AUTO-REFRESH                                    │
+// │                                                              │
+// │  Redraws every 60 seconds so the "in 20 min" badges         │
+// │  stay accurate without a page reload.                        │
+// └──────────────────────────────────────────────────────────────┘
+setInterval(() => {
+  if (data.tickets.length) render();
+}, 60000);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,21 @@
+name: Hour-before reminders
+
+on:
+  schedule:
+    # Every 15 minutes, 05:00–21:45 UTC (06:00–22:45 CET in winter).
+    - cron: "*/15 5-21 * * *"
+  workflow_dispatch:   # enables manual runs from the Actions tab
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/notify.mjs reminders
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
