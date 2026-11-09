@@ -27,6 +27,25 @@
     .done    { text-decoration: line-through; color: gray; }
     .row     { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0; }
     textarea { width: 100%; min-height: 50px; }
+    summary  { cursor: pointer; }
+    #projectList details { margin: 6px 0; }
+    input, select, textarea { max-width: 100%; min-width: 0; box-sizing: border-box; }
+
+    /* 98.css lays out checkbox labels with flex, which drops the space
+       between the time and the title; `gap` puts it back. */
+    .ticket input[type=checkbox] + label { gap: 4px; }
+
+    /* Timeline: one row per project. A bar spans start → deadline,
+       dots mark planned tickets, the red line marks today. */
+    .tl-row   { display: grid; grid-template-columns: 110px 1fr; gap: 6px; align-items: center; margin: 4px 0; }
+    .tl-name  { font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tl-track { position: relative; height: 18px; background: white; box-shadow: inset 1px 1px #808080; }
+    .tl-scale { position: relative; height: 14px; font-size: 10px; color: #555; }
+    .tl-scale span { position: absolute; }
+    .tl-bar   { position: absolute; top: 5px; height: 8px; background: #000080; }
+    .tl-dot   { position: absolute; top: 2px; width: 5px; height: 12px; margin-left: -3px; background: gold; border: 1px solid black; }
+    .tl-dot.done { background: silver; }
+    .tl-today { position: absolute; top: 0; bottom: 0; width: 2px; background: darkred; }
   </style>
 </head>
 <body>
@@ -34,18 +53,24 @@
 
 <!-- ═══════════════════════════════════════════════════════
      SIGN-IN WINDOW
-     Shown until the user signs in.
-     Sign-in uses a magic link sent by email; no password is required.
+     Shown until the user signs in. No password is required.
+     The sign-in email contains a link and a code; either one works.
+     The code is for places the link can't reach, such as an app
+     added to the iPhone home screen.
      ═══════════════════════════════════════════════════════ -->
 <div class="window" id="loginWindow">
   <div class="title-bar">
     <div class="title-bar-text">Welcome</div>
   </div>
   <div class="window-body">
-    <p>Type your email. Supabase sends you a sign-in link.</p>
+    <p>Type your email. Supabase sends a sign-in link and code.</p>
     <div class="row">
-      <input id="emailInput" type="email" placeholder="you@example.com" style="flex:1">
-      <button onclick="signIn()">Send link</button>
+      <input id="emailInput" type="email" autocomplete="email" placeholder="you@example.com" style="flex:1">
+      <button onclick="signIn()">Send email</button>
+    </div>
+    <div class="row">
+      <input id="codeInput" inputmode="numeric" autocomplete="one-time-code" placeholder="Code from the email" style="flex:1">
+      <button onclick="signInWithCode()">Sign in with code</button>
     </div>
     <p id="loginMessage"></p>
   </div>
@@ -55,7 +80,7 @@
 <!-- ═══════════════════════════════════════════════════════
      THE APP
      Everything below is hidden until sign-in succeeds.
-     Four windows: Today, New ticket, Projects, Backlog.
+     Five windows: Today, Timeline, New ticket, Projects, Backlog.
      ═══════════════════════════════════════════════════════ -->
 <div id="app" hidden>
 
@@ -72,6 +97,14 @@
       <div id="todayList"></div>
       <div id="upcoming"></div>
     </div>
+  </div>
+
+  <!-- ─── TIMELINE: projects as bars, planned tickets as dots ─── -->
+  <div class="window">
+    <div class="title-bar">
+      <div class="title-bar-text">Timeline</div>
+    </div>
+    <div class="window-body" id="timeline"></div>
   </div>
 
   <!-- ─── NEW TICKET: form to create a ticket ─── -->
@@ -172,25 +205,42 @@ let   data = { projects: [], tickets: [] };
 // ┌──────────────────────────────────────────────────────────────┐
 // │  SECTION 3: AUTHENTICATION                                  │
 // │                                                              │
-// │  signIn(): sends a magic link to the entered email.          │
+// │  signIn(): emails a sign-in link and code.                   │
+// │  signInWithCode(): signs in with the code from that email.   │
 // │  signOut(): signs out and reloads the page.                  │
 // │  onAuthStateChange: runs whenever sign-in status changes     │
 // │    and shows or hides the app accordingly.                   │
 // └──────────────────────────────────────────────────────────────┘
 
+// Prefill the email typed last time on this device.
+try { document.getElementById("emailInput").value = localStorage.getItem("email") || ""; } catch {}
+
 async function signIn() {
   const email = document.getElementById("emailInput").value.trim();
+  try { localStorage.setItem("email", email); } catch {}
 
-  // Request a sign-in link from Supabase.
-  // Opening the link returns the user to this page, signed in.
+  // Request a sign-in email from Supabase.
+  // Opening its link returns the user to this page, signed in.
   const { error } = await db.auth.signInWithOtp({
     email,
     options: { emailRedirectTo: location.origin + location.pathname }
   });
 
   document.getElementById("loginMessage").textContent = error
-    ? "Couldn't send the link: " + error.message
-    : "Check your inbox and tap the link.";
+    ? "Couldn't send the email: " + error.message
+    : "Check your inbox: tap the link, or type the code above.";
+}
+
+async function signInWithCode() {
+  const email = document.getElementById("emailInput").value.trim();
+  const token = document.getElementById("codeInput").value.trim();
+
+  // On success, onAuthStateChange (below) opens the app.
+  const { error } = await db.auth.verifyOtp({ email, token, type: "email" });
+
+  if (error) {
+    document.getElementById("loginMessage").textContent = "Code didn't work: " + error.message;
+  }
 }
 
 async function signOut() {
@@ -257,6 +307,27 @@ function projectLength(project) {
   return days >= 14 ? Math.round(days / 7) + " weeks" : days + " days";
 }
 
+// A date string moved by some days: addDays("2026-11-08", 7) → "2026-11-15".
+function addDays(date, days) {
+  const d = new Date(date + "T12:00");
+  d.setDate(d.getDate() + days);
+  return d.toLocaleDateString("sv-SE");
+}
+
+// <option> list for the Low / Med / High pickers, with `selected` chosen.
+function levelOptions(selected) {
+  return [[1, "Low"], [2, "Med"], [3, "High"]].map(([value, label]) =>
+    `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`
+  ).join("");
+}
+
+// <option> list for a project picker, with `selected` chosen.
+function projectOptions(selected) {
+  return `<option value="">No project</option>` + data.projects.map(p =>
+    `<option value="${p.id}" ${p.id === selected ? "selected" : ""}>${esc(p.name)}</option>`
+  ).join("");
+}
+
 // How many minutes until a timed ticket starts.
 // Returns null if the ticket has no time or isn't planned for today.
 function minutesUntilStart(ticket) {
@@ -296,22 +367,35 @@ async function loadAllData() {
 // ┌──────────────────────────────────────────────────────────────┐
 // │  SECTION 6: SAVING CHANGES                                  │
 // │                                                              │
-// │  Two functions that every action below uses:                 │
-// │  - updateTicket: change fields on an existing ticket.        │
-// │  - insertRow: add a new row to any table.                    │
-// │  Both save to the database, then reload everything.          │
+// │  Three functions that every action below uses:               │
+// │  - insertRow: add a new row to a table.                      │
+// │  - updateRow: change fields on an existing row.              │
+// │  - deleteRow: remove a row.                                  │
+// │  Each saves to the database, then reloads everything.        │
+// │  Tables: "projects" and "tickets".                           │
 // └──────────────────────────────────────────────────────────────┘
-
-async function updateTicket(id, fieldsToChange) {
-  const { error } = await db.from("tickets").update(fieldsToChange).eq("id", id);
-  if (error) alert("Couldn't save: " + error.message);
-  await loadAllData();
-}
 
 async function insertRow(table, newRow) {
   const { error } = await db.from(table).insert(newRow);
   if (error) alert("Couldn't save: " + error.message);
   await loadAllData();
+}
+
+async function updateRow(table, id, fieldsToChange) {
+  const { error } = await db.from(table).update(fieldsToChange).eq("id", id);
+  if (error) alert("Couldn't save: " + error.message);
+  await loadAllData();
+}
+
+async function deleteRow(table, id) {
+  const { error } = await db.from(table).delete().eq("id", id);
+  if (error) alert("Couldn't delete: " + error.message);
+  await loadAllData();
+}
+
+// Shortcut used by most ticket actions.
+function updateTicket(id, fieldsToChange) {
+  return updateRow("tickets", id, fieldsToChange);
 }
 
 
@@ -392,17 +476,47 @@ function moveToBacklog(id) {
 
 // ── Save edits inside a ticket's "Details" panel ──
 function saveDetails(id) {
+  const ticket     = findTicket(id);
+  const field      = name => document.getElementById(name + "-" + id).value;
+  const plannedFor = field("date") || null;
+
   updateTicket(id, {
-    description: document.getElementById("desc-" + id).value,
-    planned_for: document.getElementById("date-" + id).value || null,
-    start_time:  document.getElementById("time-" + id).value || null
+    title:       field("title").trim() || ticket.title,   // never save an empty title
+    project_id:  Number(field("proj")) || null,
+    importance:  Number(field("imp")),
+    urgency:     Number(field("urg")),
+    description: field("desc"),
+    planned_for: plannedFor,
+    start_time:  plannedFor ? (field("time") || null) : null,   // no date → no time
+    // Clearing the date sends the ticket to the backlog; its waiting count starts today.
+    added_to_backlog: (!plannedFor && ticket.planned_for) ? today() : ticket.added_to_backlog
   });
 }
 
 // ── Delete a ticket permanently ──
-async function deleteTicket(id) {
-  await db.from("tickets").delete().eq("id", id);
-  loadAllData();
+function deleteTicket(id) {
+  if (!confirm("Delete this ticket?")) return;
+  deleteRow("tickets", id);
+}
+
+// ── Save edits inside a project's "Edit" panel ──
+function saveProject(id) {
+  const name = document.getElementById("pname-" + id).value.trim();
+  if (!name) return;
+
+  updateRow("projects", id, {
+    name,
+    start_date: document.getElementById("pstart-" + id).value || null,
+    deadline:   document.getElementById("pend-" + id).value   || null
+  });
+}
+
+// ── Delete a project permanently ──
+// The database also deletes its tickets (see "on delete cascade" in setup.sql).
+function deleteProject(id) {
+  const count = data.tickets.filter(t => t.project_id === id).length;
+  if (!confirm(`Delete this project and its ${count} tickets?`)) return;
+  deleteRow("projects", id);
 }
 
 // ── Add a checklist step to a ticket ──
@@ -493,15 +607,26 @@ function ticketHTML(ticket, buttons) {
           : ""}
       </div>
 
-      <!-- Expandable panel: description, dates, checklist -->
+      <!-- Expandable panel: edit every field, then the checklist -->
       <details>
         <summary>Details and checklist</summary>
+        <div class="row">
+          <input id="title-${ticket.id}" value="${esc(ticket.title)}" style="flex:1">
+        </div>
+        <div class="row">
+          <select id="proj-${ticket.id}">${projectOptions(ticket.project_id)}</select>
+          Importance <select id="imp-${ticket.id}">${levelOptions(ticket.importance)}</select>
+          Urgency    <select id="urg-${ticket.id}">${levelOptions(ticket.urgency)}</select>
+        </div>
         <textarea id="desc-${ticket.id}"
                   placeholder="Description">${esc(ticket.description)}</textarea>
         <div class="row">
           Plan for <input type="date" id="date-${ticket.id}" value="${ticket.planned_for || ""}">
           at       <input type="time" id="time-${ticket.id}" value="${shortTime(ticket.start_time)}">
+        </div>
+        <div class="row">
           <button onclick="saveDetails(${ticket.id})">Save</button>
+          <button onclick="deleteTicket(${ticket.id})">Delete ticket</button>
         </div>
         ${checklistRows}
         <div class="row">
@@ -586,23 +711,39 @@ function render() {
     : "";
 
 
+  // ── TIMELINE ──
+  renderTimeline();
+
+
   // ── PROJECTS ──
   // Each project with its dates, duration, open ticket count, and slip total.
+  // Clicking a project opens its edit panel.
   document.getElementById("projectList").innerHTML =
     data.projects.map(p => {
       const myTickets = data.tickets.filter(t => t.project_id === p.id);
       const slips     = myTickets.reduce((sum, t) => sum + t.slips, 0);
       const openCount = myTickets.filter(t => !t.done).length;
 
-      return `<div class="row">
-        <b>${esc(p.name)}</b>
-        <span class="meta">
-          ${p.start_date || "?"} → ${p.deadline || "?"}
-          ${projectLength(p) ? "· " + projectLength(p) : ""}
-          ${p.deadline ? "· " + daysBetween(today(), p.deadline) + " days left" : ""}
-          · ${openCount} open · ${slips} slips
-        </span>
-      </div>`;
+      return `<details>
+        <summary>
+          <b>${esc(p.name)}</b>
+          <span class="meta">
+            ${p.start_date || "?"} → ${p.deadline || "?"}
+            ${projectLength(p) ? "· " + projectLength(p) : ""}
+            ${p.deadline ? "· " + daysBetween(today(), p.deadline) + " days left" : ""}
+            · ${openCount} open · ${slips} slips
+          </span>
+        </summary>
+        <div class="row">
+          <input id="pname-${p.id}" value="${esc(p.name)}" style="flex:1">
+        </div>
+        <div class="row">
+          Start    <input type="date" id="pstart-${p.id}" value="${p.start_date || ""}">
+          Deadline <input type="date" id="pend-${p.id}"   value="${p.deadline || ""}">
+          <button onclick="saveProject(${p.id})">Save</button>
+          <button onclick="deleteProject(${p.id})">Delete</button>
+        </div>
+      </details>`;
     }).join("") || "<p>No projects yet.</p>";
 
 
@@ -627,13 +768,68 @@ function render() {
 }
 
 
+// ── Timeline: one row per project on a shared date scale ──
+// The scale runs from the earliest date to the latest date found
+// (project dates, planned tickets, today), and is at least 4 weeks long.
+function renderTimeline() {
+  const allDates = [
+    today(),
+    ...data.projects.flatMap(p => [p.start_date, p.deadline]),
+    ...data.tickets.map(t => t.planned_for)
+  ].filter(Boolean).sort();
+
+  const first     = allDates[0];
+  const last      = [allDates[allDates.length - 1], addDays(first, 27)].sort()[1];
+  const totalDays = daysBetween(first, last) + 1;
+
+  // Position of a date along the track, as a percentage.
+  const x = date => (daysBetween(first, date) / totalDays * 100).toFixed(2) + "%";
+
+  // Scale labels: one per week, fewer when the range is long.
+  const step  = 7 * Math.ceil(totalDays / 7 / 8);
+  const ticks = [];
+  for (let d = first; d <= last; d = addDays(d, step)) {
+    ticks.push(`<span style="left:${x(d)}">${d.slice(8)}.${d.slice(5, 7)}</span>`);
+  }
+
+  // One row: name, then a track with an optional bar and ticket dots.
+  const row = (name, project, tickets) => `
+    <div class="tl-row">
+      <div class="tl-name" title="${esc(name)}">${esc(name)}</div>
+      <div class="tl-track">
+        ${(project && project.deadline)
+          ? `<div class="tl-bar" style="left:${x(project.start_date || first)};
+               width:calc(${x(addDays(project.deadline, 1))} - ${x(project.start_date || first)})"></div>`
+          : ""}
+        ${tickets.filter(t => t.planned_for).map(t =>
+          `<div class="tl-dot ${t.done ? "done" : ""}" style="left:${x(t.planned_for)}"
+                title="${t.planned_for} ${shortTime(t.start_time)} ${esc(t.title)}"></div>`
+        ).join("")}
+        <div class="tl-today" style="left:${x(today())}"></div>
+      </div>
+    </div>`;
+
+  const unassigned = data.tickets.filter(t => !t.project_id && t.planned_for);
+
+  document.getElementById("timeline").innerHTML =
+    `<div class="tl-row"><div></div><div class="tl-scale">${ticks.join("")}</div></div>` +
+    data.projects.map(p => row(p.name, p, data.tickets.filter(t => t.project_id === p.id))).join("") +
+    (unassigned.length ? row("No project", null, unassigned) : "") +
+    `<p class="meta">Bar = start → deadline · dot = planned ticket (grey = done)
+       · red line = today · hover a dot for its title</p>`;
+}
+
+
 // ┌──────────────────────────────────────────────────────────────┐
 // │  SECTION 9: AUTO-REFRESH                                    │
 // │                                                              │
 // │  Redraws every 60 seconds so the "in 20 min" badges         │
 // │  stay accurate without a page reload.                        │
+// │  Skipped while a Details or Edit panel is open, so a         │
+// │  half-typed edit isn't wiped.                                │
 // └──────────────────────────────────────────────────────────────┘
 setInterval(() => {
+  if (document.querySelector("#app details[open]")) return;
   if (data.tickets.length) render();
 }, 60000);
 </script>
