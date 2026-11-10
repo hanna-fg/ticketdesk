@@ -18,7 +18,19 @@
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 
   <style>
-    body     { background: #e9e9e6; padding: 16px; max-width: 720px; margin: auto; }
+    body     { background: #e9e9e6; padding: 16px; max-width: 1400px; margin: auto; }
+
+    /* Two columns side by side; one column on narrow screens (phones). */
+    #app         { display: grid; grid-template-columns: 2fr 3fr; gap: 16px; align-items: start; }
+    #app[hidden] { display: none; }
+    .column      { min-width: 0; }
+    /* On phones the right column (Timeline, Today, ...) comes first. */
+    @media (max-width: 900px) { #app { grid-template-columns: 1fr; } .column:last-child { order: -1; } }
+    #loginWindow { max-width: 480px; margin: 40px auto; }
+
+    h4       { font-size: 15px; margin: 8px 0; }
+    .day     { margin-top: 12px; padding-bottom: 2px; border-bottom: 1px solid #808080;
+               display: flex; justify-content: space-between; font-weight: bold; }
     .window  { margin-bottom: 16px; }
     .ticket  { margin: 6px 0; }
     .meta    { color: #555; font-size: 11px; }
@@ -80,11 +92,33 @@
 <!-- ═══════════════════════════════════════════════════════
      THE APP
      Everything below is hidden until sign-in succeeds.
-     Five windows: Today, Timeline, New ticket, Projects, Backlog.
+     Left column:  Next 7 days.
+     Right column: Timeline, Today, New ticket, Projects, Backlog.
      ═══════════════════════════════════════════════════════ -->
 <div id="app" hidden>
 
-  <!-- ─── TODAY: tickets planned for today ─── -->
+<div class="column">
+
+<!-- ─── NEXT 7 DAYS: one block per day, tickets editable ─── -->
+  <div class="window">
+    <div class="title-bar">
+      <div class="title-bar-text">Next 7 days</div>
+    </div>
+    <div class="window-body" id="week"></div>
+  </div>
+
+</div>
+<div class="column">
+
+<!-- ─── TIMELINE: projects as bars, planned tickets as dots ─── -->
+  <div class="window">
+    <div class="title-bar">
+      <div class="title-bar-text">Timeline</div>
+    </div>
+    <div class="window-body" id="timeline"></div>
+  </div>
+
+<!-- ─── TODAY: tickets planned for today ─── -->
   <div class="window">
     <div class="title-bar">
       <div class="title-bar-text">Today.exe</div>
@@ -95,19 +129,10 @@
     <div class="window-body">
       <div id="carriedOver"></div>
       <div id="todayList"></div>
-      <div id="upcoming"></div>
     </div>
   </div>
 
-  <!-- ─── TIMELINE: projects as bars, planned tickets as dots ─── -->
-  <div class="window">
-    <div class="title-bar">
-      <div class="title-bar-text">Timeline</div>
-    </div>
-    <div class="window-body" id="timeline"></div>
-  </div>
-
-  <!-- ─── NEW TICKET: form to create a ticket ─── -->
+<!-- ─── NEW TICKET: form to create a ticket ─── -->
   <div class="window">
     <div class="title-bar">
       <div class="title-bar-text">New ticket</div>
@@ -143,7 +168,7 @@
     </div>
   </div>
 
-  <!-- ─── PROJECTS: list + create ─── -->
+<!-- ─── PROJECTS: list + create ─── -->
   <div class="window">
     <div class="title-bar">
       <div class="title-bar-text">Projects</div>
@@ -164,13 +189,15 @@
     </div>
   </div>
 
-  <!-- ─── BACKLOG: unplanned tickets ─── -->
+<!-- ─── BACKLOG: unplanned tickets ─── -->
   <div class="window">
     <div class="title-bar">
       <div class="title-bar-text">Backlog</div>
     </div>
     <div class="window-body" id="backlogList"></div>
   </div>
+
+</div>
 
 </div>
 
@@ -462,16 +489,24 @@ function moveToToday(id) {
 }
 
 // ── Send a ticket back to the backlog ──
-// If it had a plan date, that counts as a slip (planned but not done).
+// If it was planned for today or earlier, that counts as a slip
+// (planned but not done). Unplanning a future day is not a slip.
 function moveToBacklog(id) {
   const ticket = findTicket(id);
+  const slipped = ticket.planned_for && ticket.planned_for <= today();
 
   updateTicket(id, {
     planned_for:      null,
     start_time:       null,
     added_to_backlog: today(),
-    slips:            ticket.slips + (ticket.planned_for ? 1 : 0)
+    slips:            ticket.slips + (slipped ? 1 : 0)
   });
+}
+
+// ── Plan a backlog ticket for the date picked next to it ──
+function planFor(id) {
+  const date = document.getElementById("plan-" + id).value;
+  if (date) updateTicket(id, { planned_for: date });
 }
 
 // ── Save edits inside a ticket's "Details" panel ──
@@ -692,23 +727,27 @@ function render() {
 
 
   // ── NEXT 7 DAYS ──
-  // Read-only preview of upcoming tickets.
-  const oneWeekOut = new Date();
-  oneWeekOut.setDate(oneWeekOut.getDate() + 7);
-  const oneWeekStr = oneWeekOut.toLocaleDateString("sv-SE");
+  // One block per day after today: weekday, date, then that day's tickets.
+  // Each ticket is fully editable through its Details panel.
+  document.getElementById("week").innerHTML =
+    [1, 2, 3, 4, 5, 6, 7].map(offset => {
+      const day     = addDays(today(), offset);
+      const weekday = new Date(day + "T12:00").toLocaleDateString("en-GB", { weekday: "long" });
+      const tickets = data.tickets
+        .filter(t => t.planned_for === day)
+        .sort(sortByTimeThenPriority);
 
-  const upcomingTickets = openTickets
-    .filter(t => t.planned_for > today() && t.planned_for <= oneWeekStr)
-    .sort((a, b) => a.planned_for.localeCompare(b.planned_for));
-
-  document.getElementById("upcoming").innerHTML = upcomingTickets.length
-    ? "<h4>Next 7 days</h4><ul>" +
-      upcomingTickets.map(t =>
-        `<li>${t.planned_for.slice(5)} ${shortTime(t.start_time)}
-             ${esc(t.title)}
-             <span class="meta">${esc(projectName(t.project_id))}</span></li>`
-      ).join("") + "</ul>"
-    : "";
+      return `<div class="day">
+          <span>${weekday} ${day.slice(8)}.${day.slice(5, 7)}.</span>
+          <span class="meta">${tickets.length || ""}</span>
+        </div>` +
+        (tickets.length
+          ? tickets.map(t => ticketHTML(t,
+              `<button onclick="moveToToday(${t.id})">Do today</button>
+               <button onclick="moveToBacklog(${t.id})">To backlog</button>`
+            )).join("")
+          : `<p class="meta">Nothing planned.</p>`);
+    }).join("");
 
 
   // ── TIMELINE ──
@@ -749,10 +788,15 @@ function render() {
 
   // ── BACKLOG ──
   // Tickets with no plan date, grouped by project, highest priority first.
+  // Each one can be pulled into today or planned for any date.
   const backlogTickets = openTickets.filter(t => !t.planned_for);
+  const groups = [...data.projects, { id: null, name: "No project" }];
 
   document.getElementById("backlogList").innerHTML =
-    data.projects.map(p => {
+    `<p class="meta">Tickets with no date wait here. They arrive when added
+       without a date, or when moved with "Not today" / "To backlog".
+       Pick a date and press Plan to schedule one.</p>` +
+    (groups.map(p => {
       const items = backlogTickets
         .filter(t => t.project_id === p.id)
         .sort((a, b) => priority(b) - priority(a));
@@ -762,9 +806,10 @@ function render() {
       return `<h4>${esc(p.name)} (${items.length})</h4>` +
         items.map(t => ticketHTML(t,
           `<button onclick="moveToToday(${t.id})">Do today</button>
-           <button onclick="deleteTicket(${t.id})">Delete</button>`
+           <input type="date" id="plan-${t.id}" value="${addDays(today(), 1)}">
+           <button onclick="planFor(${t.id})">Plan</button>`
         )).join("");
-    }).join("") || "<p>Backlog is empty.</p>";
+    }).join("") || "<p>Backlog is empty.</p>");
 }
 
 
